@@ -5,9 +5,6 @@ on:
     - cron: "0 1 * * *"
   workflow_dispatch:
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
 jobs:
   scrape:
     runs-on: ubuntu-latest
@@ -21,27 +18,19 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: 安装 Chrome
-        run: |
-          wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
-          sudo dpkg -i google-chrome-stable_current_amd64.deb || true
-          sudo apt-get install -y -qq -f 2>&1 | tail -3
-          google-chrome --version
+      - uses: browser-actions/setup-chrome@v1
 
-      - name: 安装 Python 依赖
-        run: |
-          pip install selenium openpyxl webdriver-manager 2>&1 | tail -5
+      - name: 安装依赖
+        run: pip install selenium openpyxl
 
       - name: 运行爬虫
-        run: python coffee_scraper.py 2>&1
+        run: python coffee_scraper.py
 
-      - name: 提交更新的 Excel
+      - name: 提交 Excel
         run: |
-          git config user.name "Coffee Price Bot"
+          git config user.name "bot"
           git config user.email "bot@example.com"
           git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
           git add "咖啡豆每日价格.xlsx"
-          git diff --cached --quiet || {
-            git commit -m "📊 每日数据更新 $(date +'%Y-%m-%d')"
-            git push
-          }
+          git diff --cached --quiet || git commit -m "update $(date +'%Y-%m-%d')"
+          git push
