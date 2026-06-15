@@ -10,9 +10,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
 
       - uses: actions/setup-python@v5
         with:
@@ -26,11 +23,7 @@ jobs:
       - name: 运行爬虫
         run: python coffee_scraper.py
 
-      - name: 提交 Excel
-        run: |
-          git config user.name "bot"
-          git config user.email "bot@example.com"
-          git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
-          git add "咖啡豆每日价格.xlsx"
-          git diff --cached --quiet || git commit -m "update $(date +'%Y-%m-%d')"
-          git push
+      - uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "📊 每日数据更新"
+          file_pattern: "咖啡豆每日价格.xlsx"
