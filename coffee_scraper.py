@@ -1,5 +1,5 @@
-﻿import sys, os, io, re, time
-from datetime import datetime, timedelta
+import sys, os, io, re, time
+from datetime import datetime
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 
@@ -14,32 +14,37 @@ LOCATIONS_ORDER = [
 ]
 
 def create_driver():
-    """自动选择可用浏览器：Edge(本地) -> Chrome(GitHub Actions)"""
     from selenium import webdriver
-    from selenium.webdriver.chrome.options import Options as ChromeOptions
-
-    # 尝试 Edge（本地 Windows）
-    edge_path = "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe"
-    if os.path.isfile(edge_path):
-        from selenium.webdriver.edge.options import Options
-        opts = Options()
-        opts.binary_location = edge_path
-        opts.add_argument("--headless=new")
-        opts.add_argument("--no-sandbox")
-        opts.add_argument("--disable-dev-shm-usage")
-        opts.add_argument("--disable-gpu")
-        opts.add_experimental_option("excludeSwitches", ["enable-logging"])
-        return webdriver.Edge(options=opts)
-
-    # 尝试 Chrome（GitHub Actions）
     from selenium.webdriver.chrome.options import Options
-    opts = ChromeOptions()
+
+    opts = Options()
     opts.add_argument("--headless=new")
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--disable-gpu")
-    opts.add_experimental_option("excludeSwitches", ["enable-logging"])
-    return webdriver.Chrome(options=opts)
+    opts.add_argument("--disable-blink-features=AutomationControlled")
+    opts.add_experimental_option("excludeSwitches", ["enable-automation", "enable-logging"])
+    opts.add_experimental_option("useAutomationExtension", False)
+
+    edge_path = "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe"
+    if os.path.isfile(edge_path):
+        from selenium.webdriver.edge.options import Options as EdgeOptions
+        eopts = EdgeOptions()
+        eopts.binary_location = edge_path
+        eopts.add_argument("--headless=new")
+        eopts.add_argument("--no-sandbox")
+        eopts.add_argument("--disable-dev-shm-usage")
+        eopts.add_argument("--disable-gpu")
+        eopts.add_experimental_option("excludeSwitches", ["enable-logging"])
+        return webdriver.Edge(options=eopts)
+
+    try:
+        return webdriver.Chrome(options=opts)
+    except:
+        from selenium.webdriver.chrome.service import Service
+        from webdriver_manager.chrome import ChromeDriverManager
+        service = Service(ChromeDriverManager().install())
+        return webdriver.Chrome(service=service, options=opts)
 
 def extract_prices(page_text):
     lines = page_text.split("\n")
@@ -80,9 +85,7 @@ def extract_prices(page_text):
 
 def ensure_excel():
     if os.path.isfile(EXCEL_FILE):
-        wb = load_workbook(EXCEL_FILE)
-        ws = wb.active
-        return wb, ws
+        return load_workbook(EXCEL_FILE)
     wb = Workbook()
     ws = wb.active
     ws.title = "咖啡豆每日价格"
@@ -91,24 +94,20 @@ def ensure_excel():
     tb = Border(left=Side(style="thin"), right=Side(style="thin"), top=Side(style="thin"), bottom=Side(style="thin"))
     ws.append(["日期"] + LOCATIONS_ORDER)
     for cell in ws[1]:
-        cell.font = hf
-        cell.fill = hfill
-        cell.alignment = Alignment(horizontal="center")
-        cell.border = tb
+        cell.font = hf; cell.fill = hfill
+        cell.alignment = Alignment(horizontal="center"); cell.border = tb
     ws.column_dimensions["A"].width = 14
     for i in range(2, len(LOCATIONS_ORDER) + 2):
         ws.column_dimensions[ws.cell(row=1, column=i).column_letter].width = 18
     wb.save(EXCEL_FILE)
-    return wb, ws
+    return wb
 
 def update_excel(national_avg, prices, today):
-    wb, ws = ensure_excel()
+    wb = ensure_excel()
+    ws = wb.active
     tb = Border(left=Side(style="thin"), right=Side(style="thin"), top=Side(style="thin"), bottom=Side(style="thin"))
 
-    existing = []
-    for row in ws.iter_rows(min_row=2, max_col=1, values_only=True):
-        existing.append(str(row[0]) if row[0] else "")
-
+    existing = [str(r[0]) for r in ws.iter_rows(min_row=2, max_col=1, values_only=True) if r[0]]
     row_data = [today]
     for loc in LOCATIONS_ORDER:
         if loc == "全国":
@@ -122,57 +121,48 @@ def update_excel(national_avg, prices, today):
                 for c_idx, val in enumerate(row_data[1:], 2):
                     ws.cell(row=r_idx, column=c_idx, value=val)
                 break
-        print(f"  ✓ 更新 {today} 数据")
+        print(f"  ✓ 更新 {today}")
     else:
         ws.append(row_data)
-        print(f"  ✓ 新增 {today} 数据")
+        print(f"  ✓ 新增 {today}")
 
     for row in ws.iter_rows(min_row=2, max_row=ws.max_row, min_col=1, max_col=len(LOCATIONS_ORDER)+1):
         for cell in row:
-            cell.border = tb
-            cell.alignment = Alignment(horizontal="center")
+            cell.border = tb; cell.alignment = Alignment(horizontal="center")
     wb.save(EXCEL_FILE)
     print(f"  ✓ Excel 已保存")
 
 def main():
     print("=" * 50)
-    print("☕ 咖啡豆价格爬虫开始运行")
+    print("☕ 咖啡豆价格爬虫")
     print(f"   时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
     try:
+        print("   🌐 启动浏览器...")
         driver = create_driver()
-        print(f"   🌐 正在获取 https://www.ymt.com/hangqing/juhe-26732 ...")
+        print("   🌐 正在获取页面...")
         driver.get("https://www.ymt.com/hangqing/juhe-26732")
-        time.sleep(4)
+        time.sleep(5)
         page_text = driver.find_element("tag name", "body").text
         driver.quit()
         print(f"   ✅ 页面加载成功 ({len(page_text)} 字符)")
     except Exception as e:
-        print(f"   ❌ 页面获取失败: {e}")
+        print(f"   ❌ 失败: {e}")
         return
 
     national_avg, prices = extract_prices(page_text)
     today = datetime.now().strftime("%Y-%m-%d")
 
-    print(f"\n   📅 日期: {today}")
-    if national_avg:
-        print(f"   💰 全国均价: {national_avg} 元/斤")
-    else:
-        print(f"   💰 全国均价: 未获取到")
+    print(f"   📅 {today}")
+    print(f"   💰 全国均价: {national_avg} 元/斤" if national_avg else "   💰 全国均价: 未获取")
 
     for loc in LOCATIONS_ORDER:
-        if loc == "全国":
-            val = national_avg if national_avg else "#N/A"
-        else:
-            val = prices.get(loc, "#N/A")
+        val = national_avg if loc == "全国" else prices.get(loc, "#N/A")
         print(f"      {loc}: {val}")
 
-    print(f"\n   💾 正在保存到 Excel...")
-    update_excel(national_avg, prices, today)
-
-    print(f"\n✅ 完成！Excel: {EXCEL_FILE}")
-    print("=" * 50)
+    print("   💾 保存中...")
+    update_excel(national_avg if national_avg else "#N/A", prices, today)
+    print(f"\n✅ 完成! {EXCEL_FILE}")
 
 if __name__ == "__main__":
     main()
-
