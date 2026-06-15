@@ -1,0 +1,35 @@
+name: 每日咖啡豆价格抓取
+
+on:
+  schedule:
+    - cron: "0 1 * * *"
+  workflow_dispatch:
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 安装依赖
+        run: pip install selenium openpyxl
+
+      - name: 安装 Chrome
+        uses: browser-actions/setup-chrome@v1
+
+      - name: 运行爬虫
+        run: python coffee_scraper.py
+
+      - name: 提交更新的 Excel
+        run: |
+          git config user.name "Coffee Price Bot"
+          git config user.email "bot@example.com"
+          git add "咖啡豆每日价格.xlsx"
+          git diff --cached --quiet || git commit -m "每日数据更新 $(date +'%Y-%m-%d')"
+          git push
