@@ -22,15 +22,19 @@ jobs:
           python-version: "3.11"
 
       - name: 安装依赖
-        run: pip install selenium openpyxl
+        run: |
+          pip install selenium openpyxl
+          pip install webdriver-manager
 
-      - name: 安装 Chrome
-        uses: browser-actions/setup-chrome@v1
+      - name: 查看环境
+        run: |
+          which google-chrome || which chromium-browser || echo "no chrome found"
+          python -c "from selenium import webdriver; print('selenium ok')"
 
       - name: 运行爬虫
         run: python coffee_scraper.py
 
-      - name: 提交更新的 Excel 到仓库
+      - name: 提交更新的 Excel
         run: |
           git config user.name "Coffee Price Bot"
           git config user.email "bot@example.com"
