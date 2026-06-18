@@ -1,0 +1,23 @@
+name: Coffee Price Daily Fetch
+
+on:
+  schedule:
+    # UTC 1:00 = 北京时间 9:00
+    - cron: '0 1 * * *'
+  workflow_dispatch:
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install curl_cffi openpyxl beautifulsoup4 lxml
+
+      - name: Run fetch script
+        run: python fetch_coffee_price.py
