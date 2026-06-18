@@ -17,7 +17,12 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install curl_cffi openpyxl beautifulsoup4 lxml
+        run: pip install curl_cffi openpyxl beautifulsoup4 lxml requests
 
       - name: Run fetch script
         run: python fetch_coffee_price.py
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coffee-price
+          path: coffee_price_history.xlsx
