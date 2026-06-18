@@ -9,13 +9,14 @@
     coffee_price_history.xlsx - Excel 文件，包含: 日期、收盘价、开盘价、最高价、最低价、交易量、涨跌幅
 
 依赖:
-    pip install curl_cffi openpyxl beautifulsoup4 lxml requests
+    pip install curl_cffi openpyxl beautifulsoup4 lxml requests yfinance pandas
 
 说明:
     - investing.com 的历史数据 AJAX 端点有严格的反爬保护，本脚本通过解析页面服务端渲染(SSR)
       内嵌的 JSON 数据来获取历史记录。
     - 默认 SSR 返回最近约一个月的日线数据。
     - 本地优先使用 curl_cffi 模拟 Chrome TLS 指纹；GitHub Actions 环境自动降级到 requests。
+    - investing.com 被封 IP 时，自动切换 Yahoo Finance (KC=F) 作为替代数据源。
 """
 
 import json
@@ -65,8 +66,8 @@ def fetch_page_html():
     print(f"[INFO] 正在请求页面 (requests): {INVESTING_URL}")
     resp = requests.get(INVESTING_URL, headers=HEADERS, timeout=30)
     if resp.status_code != 200:
-        print(f"[ERROR] 请求失败，状态码: {resp.status_code}")
-        sys.exit(1)
+        print(f"[WARN] 请求失败，状态码: {resp.status_code}，将尝试 yfinance 替代数据源")
+        return None
 
     print(f"[INFO] 页面获取成功，长度: {len(resp.text)} 字节")
     return resp.text
@@ -152,6 +153,57 @@ def normalize_records(raw_records):
     return result
 
 
+def fetch_from_yfinance():
+    """从 Yahoo Finance 获取 KC=F 历史数据（GitHub Actions 备选方案）"""
+    try:
+        import yfinance as yf
+    except ImportError:
+        print("[ERROR] 缺少 yfinance 库，请运行: pip install yfinance")
+        return None
+
+    import pandas as pd
+
+    print("[INFO] 正在从 Yahoo Finance 获取 KC=F 数据...")
+    ticker = yf.Ticker("KC=F")
+    df = ticker.history(period="1mo")
+
+    if df.empty:
+        print("[WARN] Yahoo Finance 未返回数据")
+        return None
+
+    df = df.reset_index()
+    raw_records = []
+    prev_close = None
+    for _, row in df.iterrows():
+        date_str = row["Date"].strftime("%Y-%m-%d")
+        close_val = float(row["Close"])
+        open_val = float(row["Open"])
+        high_val = float(row["High"])
+        low_val = float(row["Low"])
+        volume_val = int(row["Volume"]) if pd.notna(row["Volume"]) else 0
+
+        if prev_close and prev_close != 0:
+            change_pct = ((close_val / prev_close) - 1) * 100
+        else:
+            change_pct = 0
+
+        raw_records.append({
+            "rowDate": date_str,
+            "last_close": f"{close_val:.2f}",
+            "last_open": f"{open_val:.2f}",
+            "last_max": f"{high_val:.2f}",
+            "last_min": f"{low_val:.2f}",
+            "volume": str(volume_val),
+            "change_percent": f"{change_pct:.2f}",
+        })
+        prev_close = close_val
+
+    # yfinance 默认降序，反转为升序
+    raw_records.reverse()
+    print(f"[INFO] 从 Yahoo Finance 获取到 {len(raw_records)} 条记录")
+    return raw_records
+
+
 def save_to_excel(records):
     """保存数据到 Excel 文件"""
     try:
@@ -234,13 +286,20 @@ def main():
 
     html = fetch_page_html()
 
-    raw_records = extract_from_next_data(html)
+    raw_records = None
+    if html:
+        raw_records = extract_from_next_data(html)
+        if not raw_records:
+            print("[WARN] __NEXT_DATA__ 提取失败，尝试从 HTML 表格解析...")
+            raw_records = extract_from_html_tables(html)
+
+    # HTTP 抓取失败则降级到 Yahoo Finance
     if not raw_records:
-        print("[WARN] __NEXT_DATA__ 提取失败，尝试从 HTML 表格解析...")
-        raw_records = extract_from_html_tables(html)
+        print("[INFO] Investing.com 不可用，切换到 Yahoo Finance...")
+        raw_records = fetch_from_yfinance()
 
     if not raw_records:
-        print("[ERROR] 未能提取到任何数据，请检查网络或页面结构是否变化。")
+        print("[ERROR] 所有数据源均失败，请稍后重试。")
         sys.exit(1)
 
     records = normalize_records(raw_records)
