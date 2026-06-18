@@ -1,0 +1,289 @@
+"""
+美国C型咖啡期货历史数据抓取脚本
+数据来源: https://cn.investing.com/commodities/us-coffee-c-historical-data
+
+使用方法:
+    python fetch_coffee_price.py
+
+输出:
+    coffee_price_history.xlsx - Excel 文件，包含: 日期、收盘价、开盘价、最高价、最低价、交易量、涨跌幅
+
+依赖:
+    pip install curl_cffi openpyxl beautifulsoup4 lxml
+
+说明:
+    - investing.com 的历史数据 AJAX 端点有严格的反爬保护，本脚本通过解析页面服务端渲染(SSR)
+      内嵌的 JSON 数据来获取历史记录。
+    - 默认 SSR 返回最近约一个月的日线数据。如需更长历史数据，可考虑使用 yfinance 补充数据源。
+    - 脚本使用 curl_cffi 模拟 Chrome 浏览器 TLS 指纹以绕过 Cloudflare 防护。
+"""
+
+import json
+import re
+import os
+import sys
+from datetime import datetime
+
+# --- 配置 ---
+INVESTING_URL = "https://cn.investing.com/commodities/us-coffee-c-historical-data"
+OUTPUT_DIR = os.path.dirname(os.path.abspath(__file__))
+OUTPUT_FILE = os.path.join(OUTPUT_DIR, "coffee_price_history.xlsx")
+
+# 请求头
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+}
+
+
+def fetch_page_html():
+    """使用 curl_cffi 获取页面 HTML（绕过 Cloudflare）"""
+    try:
+        from curl_cffi import requests as curl_requests
+    except ImportError:
+        print("[ERROR] 缺少 curl_cffi 库，请运行: pip install curl_cffi")
+        sys.exit(1)
+
+    print(f"[INFO] 正在请求页面: {INVESTING_URL}")
+    session = curl_requests.Session()
+    resp = session.get(INVESTING_URL, headers=HEADERS, impersonate="chrome", timeout=30)
+
+    if resp.status_code != 200:
+        print(f"[ERROR] 请求失败，状态码: {resp.status_code}")
+        sys.exit(1)
+
+    print(f"[INFO] 页面获取成功，长度: {len(resp.text)} 字节")
+    return resp.text
+
+
+def extract_from_next_data(html):
+    """从 __NEXT_DATA__ JSON 中提取历史数据"""
+    match = re.search(
+        r'<script id="__NEXT_DATA__"[^>]*type="application/json"[^>]*>(.*?)</script>',
+        html,
+        re.DOTALL,
+    )
+    if not match:
+        return None
+
+    data = json.loads(match.group(1))
+    try:
+        store = data["props"]["pageProps"]["state"]["historicalDataStore"]
+        records = store["historicalData"]["data"]
+        date_range = store.get("dateRange", {})
+        print(f"[INFO] 从 __NEXT_DATA__ 提取到 {len(records)} 条记录")
+        print(f"[INFO] 日期范围: {date_range.get('startDate', '?')} ~ {date_range.get('endDate', '?')}")
+        return records
+    except (KeyError, TypeError) as e:
+        print(f"[WARN] 解析 __NEXT_DATA__ 结构失败: {e}")
+        return None
+
+
+def extract_from_html_tables(html):
+    """备用方案: 从 HTML 表格中提取历史数据"""
+    try:
+        from bs4 import BeautifulSoup
+    except ImportError:
+        print("[ERROR] 缺少 beautifulsoup4 库，请运行: pip install beautifulsoup4 lxml")
+        return None
+
+    soup = BeautifulSoup(html, "lxml")
+    tables = soup.find_all("table")
+
+    for table in tables:
+        headers = [th.get_text(strip=True) for th in table.find_all("th")]
+        # 查找包含"日期"和"收盘"的表头
+        if "日期" in headers and "收盘" in headers:
+            records = []
+            rows = table.find_all("tr")[1:]  # 跳过表头
+            for row in rows:
+                cells = row.find_all("td")
+                if len(cells) >= 7:
+                    records.append({
+                        "rowDate": cells[0].get_text(strip=True),
+                        "last_close": cells[1].get_text(strip=True),
+                        "last_open": cells[2].get_text(strip=True),
+                        "last_max": cells[3].get_text(strip=True),
+                        "last_min": cells[4].get_text(strip=True),
+                        "volume": cells[5].get_text(strip=True) if len(cells) > 5 else "",
+                        "change_percent": cells[6].get_text(strip=True) if len(cells) > 6 else "",
+                    })
+            if records:
+                print(f"[INFO] 从 HTML 表格提取到 {len(records)} 条记录")
+                return records
+    return None
+
+
+def normalize_records(raw_records):
+    """将原始记录转换为统一格式"""
+    result = []
+    for rec in raw_records:
+        item = {
+            "日期": rec.get("rowDate", ""),
+            "收盘价": rec.get("last_close", ""),
+            "开盘价": rec.get("last_open", ""),
+            "最高价": rec.get("last_max", ""),
+            "最低价": rec.get("last_min", ""),
+            "交易量": rec.get("volume", ""),
+            "涨跌幅": "",
+        }
+        # 涨跌幅可能来自 change_precent 或 change_percent 字段
+        pct = rec.get("change_precent", "") or rec.get("change_percent", "")
+        if pct:
+            try:
+                item["涨跌幅"] = f"{float(pct):+.2f}%"
+            except ValueError:
+                item["涨跌幅"] = pct
+        result.append(item)
+    return result
+
+
+def save_to_excel(records):
+    """保存数据到 Excel 文件"""
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+    except ImportError:
+        print("[ERROR] 缺少 openpyxl 库，请运行: pip install openpyxl")
+        sys.exit(1)
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "咖啡期货历史数据"
+
+    # 标题行
+    ws.merge_cells("A1:G1")
+    ws["A1"] = "美国C型咖啡期货 (KC) — 历史数据"
+    ws["A1"].font = Font(name="Microsoft YaHei", size=14, bold=True, color="1F4E79")
+    ws["A1"].alignment = Alignment(horizontal="center", vertical="center")
+    ws.row_dimensions[1].height = 30
+
+    # 数据来源
+    ws.merge_cells("A2:G2")
+    ws["A2"] = f"数据来源: {INVESTING_URL}  |  抓取时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    ws["A2"].font = Font(name="Microsoft YaHei", size=9, color="808080")
+    ws["A2"].alignment = Alignment(horizontal="center")
+    ws.row_dimensions[2].height = 22
+
+    # 表头
+    headers = ["日期", "收盘价", "开盘价", "最高价", "最低价", "交易量", "涨跌幅"]
+    header_fill = PatternFill(start_color="1F4E79", end_color="1F4E79", fill_type="solid")
+    header_font = Font(name="Microsoft YaHei", size=11, bold=True, color="FFFFFF")
+    thin_border = Border(
+        left=Side(style="thin"),
+        right=Side(style="thin"),
+        top=Side(style="thin"),
+        bottom=Side(style="thin"),
+    )
+
+    for col_idx, header in enumerate(headers, 1):
+        cell = ws.cell(row=4, column=col_idx, value=header)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+        cell.border = thin_border
+    ws.row_dimensions[4].height = 24
+
+    # 数据行
+    red_fill = PatternFill(start_color="FFE0E0", end_color="FFE0E0", fill_type="solid")
+    green_fill = PatternFill(start_color="E0FFE0", end_color="E0FFE0", fill_type="solid")
+
+    for row_idx, rec in enumerate(records, 5):
+        for col_idx, key in enumerate(headers, 1):
+            value = rec.get(key, "")
+            cell = ws.cell(row=row_idx, column=col_idx, value=value)
+            cell.font = Font(name="Microsoft YaHei", size=10)
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+            cell.border = thin_border
+
+            # 涨跌幅颜色
+            if key == "涨跌幅" and value:
+                try:
+                    if float(value.replace("%", "").replace("+", "")) >= 0:
+                        cell.fill = green_fill
+                    else:
+                        cell.fill = red_fill
+                except ValueError:
+                    pass
+
+        ws.row_dimensions[row_idx].height = 22
+
+    # 列宽
+    col_widths = [18, 12, 12, 12, 12, 12, 12]
+    for col_idx, width in enumerate(col_widths, 1):
+        ws.column_dimensions[chr(64 + col_idx)].width = width
+
+    # 冻结表头
+    ws.freeze_panes = "A5"
+
+    # 保存
+    ws.auto_filter.ref = f"A4:G{4 + len(records)}"
+    wb.save(OUTPUT_FILE)
+    print(f"[INFO] Excel 文件已保存: {OUTPUT_FILE}")
+
+
+def main():
+    print("=" * 60)
+    print("  美国C型咖啡期货 (KC) 历史数据抓取工具")
+    print("=" * 60)
+
+    # 获取页面
+    html = fetch_page_html()
+
+    # 提取数据 — 优先从 __NEXT_DATA__ 提取，备用 HTML 表格解析
+    raw_records = extract_from_next_data(html)
+    if not raw_records:
+        print("[WARN] __NEXT_DATA__ 提取失败，尝试从 HTML 表格解析...")
+        raw_records = extract_from_html_tables(html)
+
+    if not raw_records:
+        print("[ERROR] 未能提取到任何数据，请检查网络或页面结构是否变化。")
+        sys.exit(1)
+
+    # 格式化
+    records = normalize_records(raw_records)
+
+    # 检查是否有重复日期（降序排列情况下，按 rowDate 去重，保留首次出现的）
+    seen = set()
+    deduped = []
+    for rec in records:
+        date_key = rec["日期"]
+        if date_key not in seen:
+            seen.add(date_key)
+            deduped.append(rec)
+    if len(deduped) < len(records):
+        print(f"[INFO] 去重: {len(records)} -> {len(deduped)} 条")
+
+    # 升序排列（日期从早到晚）
+    deduped.reverse()
+
+    # 保存 Excel
+    save_to_excel(deduped)
+
+    # 打印预览
+    print(f"\n[预览] 共 {len(deduped)} 条记录:")
+    print("-" * 80)
+    for rec in deduped[:10]:
+        print(
+            f"  {rec['日期']:16s} | "
+            f"收盘:{rec['收盘价']:>8s} | "
+            f"开盘:{rec['开盘价']:>8s} | "
+            f"最高:{rec['最高价']:>8s} | "
+            f"最低:{rec['最低价']:>8s} | "
+            f"量:{rec['交易量']:>8s} | "
+            f"涨跌:{rec['涨跌幅']}"
+        )
+    if len(deduped) > 10:
+        print(f"  ... (还有 {len(deduped) - 10} 条)")
+
+    print(f"\n[DONE] 数据已保存到: {OUTPUT_FILE}")
+    print(f"[INFO] 共抓取 {len(deduped)} 条日线数据。")
+
+
+if __name__ == "__main__":
+    main()
