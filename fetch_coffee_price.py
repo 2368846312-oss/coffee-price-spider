@@ -204,6 +204,35 @@ def fetch_from_yfinance():
     return raw_records
 
 
+def load_existing_records():
+    """从已有 Excel 中加载历史记录，用于增量合并"""
+    if not os.path.exists(OUTPUT_FILE):
+        print("[INFO] 未找到已有数据文件，将创建新文件")
+        return []
+
+    try:
+        import pandas as pd
+        df = pd.read_excel(OUTPUT_FILE, header=3)
+        records = []
+        for _, row in df.iterrows():
+            if pd.notna(row.get("日期")):
+                records.append({
+                    "日期": str(row["日期"])[:10],
+                    "收盘价": str(row.get("收盘价", "")),
+                    "开盘价": str(row.get("开盘价", "")),
+                    "最高价": str(row.get("最高价", "")),
+                    "最低价": str(row.get("最低价", "")),
+                    "交易量": str(row.get("交易量", "")),
+                    "涨跌幅": str(row.get("涨跌幅", "")),
+                })
+        if records:
+            print(f"[INFO] 从已有文件加载 {len(records)} 条历史记录")
+        return records
+    except Exception as e:
+        print(f"[WARN] 读取已有文件失败: {e}，将创建新文件")
+        return []
+
+
 def save_to_excel(records):
     """保存数据到 Excel 文件"""
     try:
@@ -304,6 +333,7 @@ def main():
 
     records = normalize_records(raw_records)
 
+    # 去重新数据
     seen = set()
     deduped = []
     for rec in records:
@@ -312,15 +342,31 @@ def main():
             seen.add(date_key)
             deduped.append(rec)
     if len(deduped) < len(records):
-        print(f"[INFO] 去重: {len(records)} -> {len(deduped)} 条")
+        print(f"[INFO] 新数据去重: {len(records)} -> {len(deduped)} 条")
 
+    # 升序排列
     deduped.reverse()
 
-    save_to_excel(deduped)
+    # 加载已有历史数据，合并去重（按日期保留最新抓取的）
+    old_records = load_existing_records()
+    merged = {}
+    for rec in old_records:
+        merged[rec["日期"]] = rec
+    new_count = 0
+    for rec in deduped:
+        date_key = rec["日期"]
+        if date_key not in merged:
+            new_count += 1
+        merged[date_key] = rec
 
-    print(f"\n[预览] 共 {len(deduped)} 条记录:")
+    all_records = sorted(merged.values(), key=lambda x: x["日期"])
+    print(f"[INFO] 合并完成：历史 {len(old_records)} 条 + 新增 {new_count} 条 = 共 {len(all_records)} 条")
+
+    save_to_excel(all_records)
+
+    print(f"\n[预览] 共 {len(all_records)} 条记录:")
     print("-" * 80)
-    for rec in deduped[:10]:
+    for rec in all_records[-10:]:
         print(
             f"  {rec['日期']:16s} | "
             f"收盘:{rec['收盘价']:>8s} | "
@@ -330,11 +376,11 @@ def main():
             f"量:{rec['交易量']:>8s} | "
             f"涨跌:{rec['涨跌幅']}"
         )
-    if len(deduped) > 10:
-        print(f"  ... (还有 {len(deduped) - 10} 条)")
+    if len(all_records) > 10:
+        print(f"  ... (还有 {len(all_records) - 10} 条)")
 
     print(f"\n[DONE] 数据已保存到: {OUTPUT_FILE}")
-    print(f"[INFO] 共抓取 {len(deduped)} 条日线数据。")
+    print(f"[INFO] 本次新增 {new_count} 条，累计 {len(all_records)} 条日线数据。")
 
 
 if __name__ == "__main__":
